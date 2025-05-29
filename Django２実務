@@ -1,0 +1,3382 @@
+# Django + Vue.js + MySQL 上級パラメーター処理完全ガイド - プロフェッショナル向け
+
+## 目次
+1. [アーキテクチャ設計原則](#architecture)
+2. [Django側：高度なパラメーター処理](#django-advanced)
+3. [Vue.js側：プロフェッショナルな実装](#vue-professional)
+4. [データベース最適化戦略](#database-optimization)
+5. [セキュリティ強化](#security-hardening)
+6. [パフォーマンス・スケーラビリティ](#performance)
+7. [テスト戦略](#testing)
+
+---
+
+## 1. アーキテクチャ設計原則 {#architecture}
+
+### MVC/MVTパターンの正しい実装
+
+```python
+# models.py - データモデル層の設計
+from django.db import models
+from django.core.validators import RegexValidator, MinLengthValidator
+from django.utils import timezone
+import uuid
+
+class BaseModel(models.Model):
+    """
+    すべてのモデルの基底クラス
+    共通フィールドと機能を提供
+    """
+    # UUIDを主キーとして使用（セキュリティ向上・分散システム対応）
+    id = models.UUIDField(
+        primary_key=True,           # 主キーとして設定
+        default=uuid.uuid4,         # デフォルト値にUUID4を使用
+        editable=False,             # 管理画面で編集不可
+        help_text="システム内で一意のID"
+    )
+    
+    # 作成日時（自動設定、編集不可）
+    created_at = models.DateTimeField(
+        auto_now_add=True,          # レコード作成時に自動設定
+        db_index=True,              # インデックス作成（検索高速化）
+        help_text="レコード作成日時"
+    )
+    
+    # 更新日時（自動更新）
+    updated_at = models.DateTimeField(
+        auto_now=True,              # レコード更新時に自動更新
+        db_index=True,              # インデックス作成
+        help_text="レコード最終更新日時"
+    )
+    
+    # 論理削除フラグ（物理削除を避ける）
+    is_deleted = models.BooleanField(
+        default=False,              # デフォルトは削除されていない
+        db_index=True,              # 削除状態での検索を高速化
+        help_text="論理削除フラグ"
+    )
+    
+    class Meta:
+        abstract = True             # 抽象モデル（テーブル作成されない）
+        ordering = ['-created_at']  # デフォルトソート順
+
+class User(BaseModel):
+    """
+    ユーザーモデル - エンタープライズ対応設計
+    """
+    
+    # 名前バリデーター（日本語・英語・ハイフン・スペース許可）
+    name_validator = RegexValidator(
+        regex=r'^[a-zA-Z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\s\-]+$',
+        message='名前は日本語、英語、ハイフン、スペースのみ使用可能です',
+        code='invalid_name'
+    )
+    
+    name = models.CharField(
+        max_length=100,                     # 最大100文字
+        validators=[                        # バリデーター適用
+            name_validator,
+            MinLengthValidator(1, '名前は必須です')
+        ],
+        db_index=True,                      # 検索用インデックス
+        help_text="ユーザーの表示名"
+    )
+    
+    # メールアドレス（ユニーク制約）
+    email = models.EmailField(
+        unique=True,                        # 一意制約
+        db_index=True,                      # 検索高速化
+        error_messages={
+            'unique': 'このメールアドレスは既に使用されています'
+        },
+        help_text="ログイン用メールアドレス"
+    )
+    
+    # 年齢（範囲制約）
+    age = models.PositiveSmallIntegerField(
+        null=True,                          # NULL許可
+        blank=True,                         # フォームで空白許可
+        db_index=True,                      # 年齢検索用
+        help_text="ユーザーの年齢"
+    )
+    
+    # 都市（選択肢制限）
+    CITY_CHOICES = [
+        ('tokyo', '東京'),
+        ('osaka', '大阪'),
+        ('nagoya', '名古屋'),
+        ('fukuoka', '福岡'),
+        ('sapporo', '札幌'),
+        ('sendai', '仙台'),
+        ('hiroshima', '広島'),
+        ('other', 'その他')
+    ]
+    
+    city = models.CharField(
+        max_length=20,                      # 選択肢キーの最大長
+        choices=CITY_CHOICES,               # 選択肢制限
+        blank=True,                         # 空白許可
+        db_index=True,                      # 地域検索用
+        help_text="居住都市"
+    )
+    
+    # アクティブ状態（アカウント無効化機能）
+    is_active = models.BooleanField(
+        default=True,                       # デフォルトでアクティブ
+        db_index=True,                      # 状態検索用
+        help_text="アカウントのアクティブ状態"
+    )
+    
+    class Meta:
+        db_table = 'users'                  # テーブル名を明示
+        verbose_name = 'ユーザー'           # 管理画面表示名
+        verbose_name_plural = 'ユーザー'    # 管理画面複数形
+        indexes = [
+            # 複合インデックス（よく使われる検索条件の組み合わせ）
+            models.Index(fields=['city', 'age'], name='idx_user_city_age'),
+            models.Index(fields=['is_active', 'created_at'], name='idx_user_active_created'),
+        ]
+    
+    def __str__(self):
+        """
+        オブジェクトの文字列表現
+        管理画面やデバッグで表示される
+        """
+        return f"{self.name} ({self.email})"
+    
+    def save(self, *args, **kwargs):
+        """
+        保存処理をオーバーライド
+        カスタムバリデーションやビジネスロジックを実装
+        """
+        # メールアドレスを小文字に正規化
+        if self.email:
+            self.email = self.email.lower().strip()
+        
+        # 名前の前後空白を削除
+        if self.name:
+            self.name = self.name.strip()
+        
+        # 年齢の範囲チェック
+        if self.age is not None and (self.age < 0 or self.age > 150):
+            raise ValueError('年齢は0-150の範囲で入力してください')
+        
+        # 親クラスのsaveメソッドを呼び出し
+        super().save(*args, **kwargs)
+```
+
+---
+
+## 2. Django側：高度なパラメーター処理 {#django-advanced}
+
+### プロフェッショナルなView設計
+
+```python
+# views.py - 企業レベルのView実装
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.utils.decorators import method_decorator
+from django.views.generic import View
+from django.db import transaction, connection
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+from django.core.cache import cache
+from django.conf import settings
+import json
+import logging
+import time
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
+
+# ロガー設定
+logger = logging.getLogger(__name__)
+
+@dataclass
+class APIResponse:
+    """
+    API レスポンスの標準化されたデータクラス
+    一貫性のあるレスポンス形式を保証
+    """
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    errors: Optional[Dict[str, List[str]]] = None
+    pagination: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """辞書形式に変換（JSON化用）"""
+        result = {'success': self.success}
+        
+        if self.data is not None:
+            result['data'] = self.data
+        if self.error is not None:
+            result['error'] = self.error
+        if self.errors is not None:
+            result['errors'] = self.errors
+        if self.pagination is not None:
+            result['pagination'] = self.pagination
+        if self.meta is not None:
+            result['meta'] = self.meta
+            
+        return result
+
+class APIResponseMixin:
+    """
+    APIレスポンス処理のMixin
+    統一されたレスポンス形式を提供
+    """
+    
+    def json_response(self, response: APIResponse, status: int = 200) -> JsonResponse:
+        """JSONレスポンスを生成"""
+        return JsonResponse(
+            response.to_dict(),
+            status=status,
+            json_dumps_params={'ensure_ascii': False}  # 日本語文字化け防止
+        )
+    
+    def success_response(self, data: Dict[str, Any], 
+                        pagination: Optional[Dict[str, Any]] = None,
+                        meta: Optional[Dict[str, Any]] = None) -> JsonResponse:
+        """成功レスポンス"""
+        response = APIResponse(
+            success=True,
+            data=data,
+            pagination=pagination,
+            meta=meta
+        )
+        return self.json_response(response)
+    
+    def error_response(self, error: str, status: int = 400, 
+                      errors: Optional[Dict[str, List[str]]] = None) -> JsonResponse:
+        """エラーレスポンス"""
+        response = APIResponse(
+            success=False,
+            error=error,
+            errors=errors
+        )
+        return self.json_response(response, status=status)
+
+class BaseAPIView(View, APIResponseMixin):
+    """
+    すべてのAPIビューの基底クラス
+    共通機能とエラーハンドリングを提供
+    """
+    
+    def dispatch(self, request, *args, **kwargs):
+        """
+        リクエストの前処理・後処理を行う
+        ログ記録、パフォーマンス測定、エラーハンドリング
+        """
+        # リクエスト開始時間を記録
+        start_time = time.time()
+        
+        # リクエスト情報をログに記録
+        logger.info(f"API Request: {request.method} {request.path} from {request.META.get('REMOTE_ADDR')}")
+        
+        try:
+            # 親クラスのdispatchメソッドを実行
+            response = super().dispatch(request, *args, **kwargs)
+            
+            # レスポンス時間を計算
+            process_time = time.time() - start_time
+            
+            # レスポンスヘッダーに処理時間を追加
+            response['X-Process-Time'] = f"{process_time:.3f}s"
+            
+            # 成功ログを記録
+            logger.info(f"API Response: {response.status_code} ({process_time:.3f}s)")
+            
+            return response
+            
+        except Exception as e:
+            # 予期しないエラーをキャッチ
+            logger.error(f"Unexpected error in {self.__class__.__name__}: {str(e)}", exc_info=True)
+            
+            # プロダクション環境では詳細なエラー情報を隠す
+            if settings.DEBUG:
+                error_message = f"Internal server error: {str(e)}"
+            else:
+                error_message = "内部サーバーエラーが発生しました"
+            
+            return self.error_response(error_message, status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class UserDetailView(BaseAPIView):
+    """
+    ユーザー詳細取得API
+    URLパラメーターを使用した高度な実装
+    """
+    
+    def get(self, request, user_id: str) -> JsonResponse:
+        """
+        ユーザー詳細情報を取得
+        
+        Args:
+            request: HTTPリクエストオブジェクト
+            user_id: URL から抽出されたユーザーID（UUID文字列）
+        
+        Returns:
+            JsonResponse: ユーザー情報またはエラー情報
+        """
+        
+        # UUIDの妥当性チェック
+        try:
+            import uuid
+            uuid.UUID(user_id)  # UUID形式かチェック
+        except ValueError:
+            return self.error_response("無効なユーザーIDです", status=400)
+        
+        # キャッシュキーを生成
+        cache_key = f"user_detail_{user_id}"
+        
+        # キャッシュから取得を試行
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            logger.info(f"Cache hit for user {user_id}")
+            return self.success_response(
+                data={'user': cached_data},
+                meta={'cache_hit': True}
+            )
+        
+        # データベースクエリ実行
+        try:
+            with connection.cursor() as cursor:
+                # 最適化されたSQLクエリ（JOINやサブクエリを使用）
+                sql = """
+                    SELECT 
+                        u.id,
+                        u.name,
+                        u.email,
+                        u.age,
+                        u.city,
+                        u.is_active,
+                        u.created_at,
+                        u.updated_at,
+                        -- 関連テーブルからの集計情報も取得
+                        (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) as order_count,
+                        (SELECT MAX(o.created_at) FROM orders o WHERE o.user_id = u.id) as last_order_date
+                    FROM users u
+                    WHERE u.id = %s 
+                        AND u.is_deleted = FALSE 
+                        AND u.is_active = TRUE
+                """
+                
+                # パラメーター化クエリでSQLインジェクション対策
+                cursor.execute(sql, [user_id])
+                
+                row = cursor.fetchone()
+                
+                if not row:
+                    return self.error_response("ユーザーが見つかりません", status=404)
+                
+                # カラム名を取得してデータを構造化
+                columns = [desc[0] for desc in cursor.description]
+                user_data = dict(zip(columns, row))
+                
+                # 日時データを ISO 8601 形式に変換
+                for field in ['created_at', 'updated_at', 'last_order_date']:
+                    if user_data.get(field):
+                        user_data[field] = user_data[field].isoformat()
+                
+                # 都市名を日本語表示に変換
+                city_display = dict(User.CITY_CHOICES).get(user_data['city'], user_data['city'])
+                user_data['city_display'] = city_display
+                
+                # キャッシュに保存（5分間）
+                cache.set(cache_key, user_data, 300)
+                
+                return self.success_response(
+                    data={'user': user_data},
+                    meta={
+                        'cache_hit': False,
+                        'query_time': time.time()
+                    }
+                )
+                
+        except Exception as e:
+            logger.error(f"Database error in UserDetailView: {str(e)}")
+            return self.error_response("データベースエラーが発生しました", status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class UserSearchView(BaseAPIView):
+    """
+    ユーザー検索API
+    高度なクエリパラメーター処理と動的SQLクエリ構築
+    """
+    
+    # 検索可能フィールドの定義
+    SEARCHABLE_FIELDS = {
+        'name': {
+            'type': 'text',
+            'operator': 'ILIKE',  # 大文字小文字を区別しない部分一致
+            'max_length': 100
+        },
+        'email': {
+            'type': 'text',
+            'operator': '=',
+            'max_length': 254
+        },
+        'city': {
+            'type': 'choice',
+            'choices': [choice[0] for choice in User.CITY_CHOICES],
+            'operator': '='
+        },
+        'age_min': {
+            'type': 'integer',
+            'operator': '>=',
+            'min_value': 0,
+            'max_value': 150,
+            'target_field': 'age'
+        },
+        'age_max': {
+            'type': 'integer',
+            'operator': '<=',
+            'min_value': 0,
+            'max_value': 150,
+            'target_field': 'age'
+        }
+    }
+    
+    def get(self, request) -> JsonResponse:
+        """
+        ユーザーを検索
+        
+        クエリパラメーター:
+            name: 名前での部分一致検索
+            email: メールアドレスでの完全一致検索
+            city: 都市での検索
+            age_min: 最小年齢
+            age_max: 最大年齢
+            page: ページ番号（デフォルト: 1）
+            page_size: 1ページあたりのアイテム数（デフォルト: 20, 最大: 100）
+            sort_by: ソートフィールド（デフォルト: created_at）
+            sort_order: ソート順（asc/desc、デフォルト: desc）
+        """
+        
+        # パラメーター取得と検証
+        search_params = self._extract_search_params(request)
+        if isinstance(search_params, JsonResponse):
+            return search_params  # バリデーションエラー
+        
+        pagination_params = self._extract_pagination_params(request)
+        if isinstance(pagination_params, JsonResponse):
+            return pagination_params  # バリデーションエラー
+        
+        # キャッシュキーを生成（検索条件とページング情報から）
+        cache_key = self._generate_cache_key(search_params, pagination_params)
+        
+        # キャッシュから取得を試行
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            return self.success_response(
+                data=cached_result,
+                meta={'cache_hit': True}
+            )
+        
+        try:
+            with connection.cursor() as cursor:
+                # 動的SQLクエリを構築
+                query_builder = self._build_search_query(search_params, pagination_params)
+                
+                # メインクエリ実行
+                cursor.execute(query_builder['main_query'], query_builder['params'])
+                rows = cursor.fetchall()
+                
+                # カラム名を取得
+                columns = [desc[0] for desc in cursor.description]
+                
+                # 結果をフォーマット
+                users = []
+                for row in rows:
+                    user_data = dict(zip(columns, row))
+                    
+                    # 日時フォーマット
+                    for field in ['created_at', 'updated_at']:
+                        if user_data.get(field):
+                            user_data[field] = user_data[field].isoformat()
+                    
+                    # 都市名表示
+                    if user_data.get('city'):
+                        user_data['city_display'] = dict(User.CITY_CHOICES).get(
+                            user_data['city'], user_data['city']
+                        )
+                    
+                    users.append(user_data)
+                
+                # 総件数を取得
+                cursor.execute(query_builder['count_query'], query_builder['count_params'])
+                total_count = cursor.fetchone()[0]
+                
+                # ページネーション情報を計算
+                pagination_info = self._calculate_pagination(
+                    total_count, 
+                    pagination_params['page'], 
+                    pagination_params['page_size']
+                )
+                
+                result_data = {
+                    'users': users,
+                    'search_params': search_params,
+                    'pagination': pagination_info
+                }
+                
+                # キャッシュに保存（2分間）
+                cache.set(cache_key, result_data, 120)
+                
+                return self.success_response(
+                    data=result_data,
+                    meta={'cache_hit': False}
+                )
+                
+        except Exception as e:
+            logger.error(f"Search error: {str(e)}")
+            return self.error_response("検索エラーが発生しました", status=500)
+    
+    def _extract_search_params(self, request) -> Dict[str, Any]:
+        """検索パラメーターを抽出・検証"""
+        params = {}
+        errors = {}
+        
+        for param_name, config in self.SEARCHABLE_FIELDS.items():
+            value = request.GET.get(param_name)
+            
+            if not value:
+                continue
+            
+            # データ型別バリデーション
+            if config['type'] == 'text':
+                value = value.strip()
+                if len(value) > config.get('max_length', 255):
+                    errors[param_name] = [f"{param_name}は{config['max_length']}文字以内で入力してください"]
+                    continue
+                params[param_name] = value
+                
+            elif config['type'] == 'integer':
+                try:
+                    value = int(value)
+                    if 'min_value' in config and value < config['min_value']:
+                        errors[param_name] = [f"{param_name}は{config['min_value']}以上で入力してください"]
+                        continue
+                    if 'max_value' in config and value > config['max_value']:
+                        errors[param_name] = [f"{param_name}は{config['max_value']}以下で入力してください"]
+                        continue
+                    params[param_name] = value
+                except ValueError:
+                    errors[param_name] = [f"{param_name}は数値で入力してください"]
+                    continue
+                    
+            elif config['type'] == 'choice':
+                if value not in config['choices']:
+                    errors[param_name] = [f"{param_name}は有効な選択肢から選んでください"]
+                    continue
+                params[param_name] = value
+        
+        if errors:
+            return self.error_response("パラメーターエラー", status=400, errors=errors)
+        
+        return params
+    
+    def _extract_pagination_params(self, request) -> Dict[str, Any]:
+        """ページネーションパラメーターを抽出・検証"""
+        try:
+            page = int(request.GET.get('page', 1))
+            if page < 1:
+                page = 1
+        except ValueError:
+            return self.error_response("pageは正の整数で指定してください", status=400)
+        
+        try:
+            page_size = int(request.GET.get('page_size', 20))
+            if page_size < 1:
+                page_size = 20
+            elif page_size > 100:  # 最大制限
+                page_size = 100
+        except ValueError:
+            return self.error_response("page_sizeは正の整数で指定してください", status=400)
+        
+        # ソートパラメーター
+        sort_by = request.GET.get('sort_by', 'created_at')
+        allowed_sort_fields = ['name', 'email', 'age', 'city', 'created_at', 'updated_at']
+        if sort_by not in allowed_sort_fields:
+            return self.error_response(f"sort_byは{allowed_sort_fields}から選択してください", status=400)
+        
+        sort_order = request.GET.get('sort_order', 'desc').lower()
+        if sort_order not in ['asc', 'desc']:
+            return self.error_response("sort_orderはascまたはdescで指定してください", status=400)
+        
+        return {
+            'page': page,
+            'page_size': page_size,
+            'sort_by': sort_by,
+            'sort_order': sort_order
+        }
+    
+    def _build_search_query(self, search_params: Dict[str, Any], 
+                          pagination_params: Dict[str, Any]) -> Dict[str, Any]:
+        """動的SQLクエリを構築"""
+        
+        # 基本SELECT文
+        base_select = """
+            SELECT 
+                id, name, email, age, city, is_active, created_at, updated_at
+            FROM users
+        """
+        
+        base_count = "SELECT COUNT(*) FROM users"
+        
+        # WHERE条件を構築
+        where_conditions = ["is_deleted = FALSE", "is_active = TRUE"]
+        query_params = []
+        
+        for param_name, value in search_params.items():
+            config = self.SEARCHABLE_FIELDS[param_name]
+            target_field = config.get('target_field', param_name)
+            operator = config['operator']
+            
+            if operator == 'ILIKE':
+                where_conditions.append(f"{target_field} ILIKE %s")
+                query_params.append(f"%{value}%")
+            else:
+                where_conditions.append(f"{target_field} {operator} %s")
+                query_params.append(value)
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        # ORDER BY句を構築
+        sort_direction = "ASC" if pagination_params['sort_order'] == 'asc' else "DESC"
+        order_by = f"ORDER BY {pagination_params['sort_by']} {sort_direction}"
+        
+        # LIMIT/OFFSET句を構築
+        offset = (pagination_params['page'] - 1) * pagination_params['page_size']
+        limit_offset = f"LIMIT %s OFFSET %s"
+        
+        # 最終クエリを組み立て
+        main_query = f"{base_select} WHERE {where_clause} {order_by} {limit_offset}"
+        count_query = f"{base_count} WHERE {where_clause}"
+        
+        main_params = query_params + [pagination_params['page_size'], offset]
+        
+        return {
+            'main_query': main_query,
+            'params': main_params,
+            'count_query': count_query,
+            'count_params': query_params
+        }
+    
+    def _generate_cache_key(self, search_params: Dict[str, Any], 
+                          pagination_params: Dict[str, Any]) -> str:
+        """キャッシュキーを生成"""
+        import hashlib
+        
+        # パラメーターを文字列に変換してハッシュ化
+        params_str = json.dumps({
+            'search': search_params,
+            'pagination': pagination_params
+        }, sort_keys=True)
+        
+        hash_value = hashlib.md5(params_str.encode()).hexdigest()
+        return f"user_search_{hash_value}"
+    
+    def _calculate_pagination(self, total_count: int, page: int, page_size: int) -> Dict[str, Any]:
+        """ページネーション情報を計算"""
+        total_pages = (total_count + page_size - 1) // page_size
+        
+        return {
+            'current_page': page,
+            'page_size': page_size,
+            'total_count': total_count,
+            'total_pages': total_pages,
+            'has_previous': page > 1,
+            'has_next': page < total_pages,
+            'previous_page': page - 1 if page > 1 else None,
+            'next_page': page + 1 if page < total_pages else None
+        }
+
+@method_decorator(csrf_exempt, name='dispatch')
+class UserCreateView(BaseAPIView):
+    """
+    ユーザー作成API
+    高度なバリデーションとトランザクション処理
+    """
+    
+    def post(self, request) -> JsonResponse:
+        """
+        新しいユーザーを作成
+        
+        リクエストボディにJSON形式でユーザー情報を送信
+        """
+        try:
+            # JSONデータを解析
+            json_data = json.loads(request.body.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            return self.error_response(f"無効なJSON形式です: {str(e)}", status=400)
+        
+        # バリデーション実行
+        validation_result = self._validate_user_data(json_data)
+        if isinstance(validation_result, JsonResponse):
+            return validation_result
+        
+        validated_data = validation_result
+        
+        # トランザクション内でユーザー作成
+        try:
+            with transaction.atomic():  # データベーストランザクション開始
+                
+                # メールアドレスの重複チェック
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM users WHERE email = %s AND is_deleted = FALSE",
+                        [validated_data['email']]
+                    )
+                    
+                    if cursor.fetchone()[0] > 0:
+                        return self.error_response(
+                            "このメールアドレスは既に使用されています", 
+                            status=400
+                        )
+                    
+                    # 新しいユーザーを挿入
+                    insert_sql = """
+                        INSERT INTO users (id, name, email, age, city, created_at, updated_at) 
+                        VALUES (uuid_generate_v4(), %s, %s, %s, %s, NOW(), NOW())
+                        RETURNING id, name, email, age, city, created_at, updated_at
+                    """
+                    
+                    cursor.execute(insert_sql, [
+                        validated_data['name'],
+                        validated_data['email'],
+                        validated_data.get('age'),
+                        validated_data.get('city')
+                    ])
+                    
+                    # 作成されたユーザー情報を取得
+                    row = cursor.fetchone()
+                    columns = [desc[0] for desc in cursor.description]
+                    user_data = dict(zip(columns, row))
+                    
+                    # UUIDを文字列に変換
+                    user_data['id'] = str(user_data['id'])
+                    
+                    # 日時をISO形式に変換
+                    for field in ['created_at', 'updated_at']:
+                        if user_data.get(field):
+                            user_data[field] = user_data[field].isoformat()
+                    
+                    # 都市名表示を追加
+                    if user_data.get('city'):
+                        user_data['city_display'] = dict(User.CITY_CHOICES).get(
+                            user_data['city'], user_data['city']
+                        )
+                    
+                    # 作成ログを記録
+                    logger.info(f"User created: {user_data['id']} ({user_data['email']})")
+                    
+                    return self.success_response(
+                        data={
+                            'user': user_data,
+                            'message': 'ユーザーが正常に作成されました'
+                        },
+                        meta={'created': True}
+                    )
+                    
+        except Exception as e:
+            logger.error(f"User creation error: {str(e)}")
+            return self.error_response("ユーザー作成に失敗しました", status=500)
+    
+    def _validate_user_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """ユーザーデータのバリデーション"""
+        errors = {}
+        validated_data = {}
+        
+        # 名前のバリデーション
+        name = data.get('name', '').strip()
+        if not name:
+            errors['name'] = ['名前は必須です']
+        elif len(name) > 100:
+            errors['name'] = ['名前は100文字以内で入力してください']
+        else:
+            # 文字種チェック
+            import re
+            if not re.match(r'^[a-zA-Z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\s\-]+$', name):
+                errors['name'] = ['名前は日本語、英語、ハイフン、スペースのみ使用可能です']
+            else:
+                validated_data['name'] = name
+        
+        # メールアドレスのバリデーション
+        email = data.get('email', '').strip().lower()
+        if not email:
+            errors['email'] = ['メールアドレスは必須です']
+        else:
+            # Django の EmailValidator を使用
+            from django.core.validators import validate_email
+            from django.core.exceptions import ValidationError
+            
+            try:
+                validate_email(email)
+                validated_data['email'] = email
+            except ValidationError:
+                errors['email'] = ['有効なメールアドレス形式で入力してください']
+        
+        # 年齢のバリデーション（オプション）
+        age = data.get('age')
+        if age is not None:
+            if not isinstance(age, int) or age < 0 or age > 150:
+                errors['age'] = ['年齢は0-150の整数で入力してください']
+            else:
+                validated_data['age'] = age
+        
+        # 都市のバリデーション（オプション）
+        city = data.get('city')
+        if city:
+            valid_cities = [choice[0] for choice in User.CITY_CHOICES]
+            if city not in valid_cities:
+                errors['city'] = [f'都市は{valid_cities}から選択してください']
+            else:
+                validated_data['city'] = city
+        
+        if errors:
+            return self.error_response("バリデーションエラー", status=400, errors=errors)
+        
+        return validated_data
+```
+
+---
+
+## 3. Vue.js側：プロフェッショナルな実装 {#vue-professional}
+
+### エンタープライズレベルの API クライアント設計
+
+```javascript
+// api/client.js - プロフェッショナルなAPIクライアント
+import axios from 'axios'
+
+/**
+ * APIクライアント設定クラス
+ * エンタープライズレベルのHTTPクライアント機能を提供
+ */
+class APIClient {
+  constructor() {
+    // Axiosインスタンスを作成
+    this.client = axios.create({
+      baseURL: process.env.VUE_APP_API_BASE_URL || 'http://localhost:8000/api',
+      timeout: 30000, // 30秒タイムアウト
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }
+    })
+    
+    // リクエストインターセプターを設定
+    this.setupRequestInterceptors()
+    
+    // レスポンスインターセプターを設定
+    this.setupResponseInterceptors()
+    
+    // リトライ設定
+    this.retryConfig = {
+      retries: 3,           // 最大リトライ回数
+      retryDelay: 1000,     // リトライ間隔（ミリ秒）
+      retryCondition: (error) => {
+        // 5xx エラーまたはネットワークエラーの場合にリトライ
+        return !error.response || (error.response.status >= 500 && error.response.status <= 599)
+      }
+    }
+  }
+  
+  /**
+   * リクエストインターセプターの設定
+   * 認証トークン付加、リクエストログ、パフォーマンス測定
+   */
+  setupRequestInterceptors() {
+    this.client.interceptors.request.use(
+      (config) => {
+        // リクエスト開始時間を記録
+        config.metadata = { startTime: new Date() }
+        
+        // 認証トークンを自動付加
+        const token = this.getAuthToken()
+        if (token) {
+          config.headers['Authorization'] = `Bearer ${token}`
+        }
+        
+        // CSRFトークンを自動付加（Django対応）
+        const csrfToken = this.getCSRFToken()
+        if (csrfToken) {
+          config.headers['X-CSRFToken'] = csrfToken
+        }
+        
+        // リクエストIDを生成（ログトレース用）
+        config.headers['X-Request-ID'] = this.generateRequestId()
+        
+        // デバッグモードでリクエストをログ出力
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🚀 API Request:', {
+            method: config.method.toUpperCase(),
+            url: config.url,
+            params: config.params,
+            data: config.data
+          })
+        }
+        
+        return config
+      },
+      (error) => {
+        console.error('❌ Request interceptor error:', error)
+        return Promise.reject(error)
+      }
+    )
+  }
+  
+  /**
+   * レスポンスインターセプターの設定
+   * エラーハンドリング、レスポンスログ、リトライ機能
+   */
+  setupResponseInterceptors() {
+    this.client.interceptors.response.use(
+      (response) => {
+        // レスポンス時間を計算
+        const endTime = new Date()
+        const duration = endTime.getTime() - response.config.metadata.startTime.getTime()
+        
+        // デバッグモードでレスポンスをログ出力
+        if (process.env.NODE_ENV === 'development') {
+          console.log('✅ API Response:', {
+            status: response.status,
+            url: response.config.url,
+            duration: `${duration}ms`,
+            data: response.data
+          })
+        }
+        
+        // レスポンスの標準化
+        return this.normalizeResponse(response)
+      },
+      async (error) => {
+        // エラーログを記録
+        this.logError(error)
+        
+        // リトライ処理
+        if (this.shouldRetry(error)) {
+          return this.retryRequest(error)
+        }
+        
+        // エラーレスポンスを標準化
+        return Promise.reject(this.normalizeError(error))
+      }
+    )
+  }
+  
+  /**
+   * レスポンスの標準化
+   * すべてのAPIレスポンスを統一された形式に変換
+   */
+  normalizeResponse(response) {
+    const normalizedResponse = {
+      success: true,
+      data: response.data,
+      status: response.status,
+      headers: response.headers,
+      meta: {
+        timestamp: new Date().toISOString(),
+        requestId: response.config.headers['X-Request-ID']
+      }
+    }
+    
+    // Django APIの標準レスポンス形式をチェック
+    if (response.data && typeof response.data.success === 'boolean') {
+      normalizedResponse.success = response.data.success
+      normalizedResponse.data = response.data.data || response.data
+      normalizedResponse.pagination = response.data.pagination
+      normalizedResponse.errors = response.data.errors
+    }
+    
+    return normalizedResponse
+  }
+  
+  /**
+   * エラーレスポンスの標準化
+   * すべてのAPIエラーを統一された形式に変換
+   */
+  normalizeError(error) {
+    const normalizedError = {
+      success: false,
+      message: 'エラーが発生しました',
+      status: 500,
+      errors: {},
+      meta: {
+        timestamp: new Date().toISOString(),
+        requestId: error.config?.headers?.['X-Request-ID'] || null
+      }
+    }
+    
+    if (error.response) {
+      // サーバーからエラーレスポンスが返された場合
+      normalizedError.status = error.response.status
+      normalizedError.data = error.response.data
+      
+      // Django APIのエラー形式を処理
+      if (error.response.data) {
+        normalizedError.message = error.response.data.error || normalizedError.message
+        normalizedError.errors = error.response.data.errors || {}
+      }
+      
+      // HTTPステータス別のデフォルトメッセージ
+      switch (error.response.status) {
+        case 400:
+          normalizedError.message = normalizedError.message || 'リクエストが不正です'
+          break
+        case 401:
+          normalizedError.message = '認証が必要です'
+          break
+        case 403:
+          normalizedError.message = 'アクセス権限がありません'
+          break
+        case 404:
+          normalizedError.message = 'データが見つかりません'
+          break
+        case 429:
+          normalizedError.message = 'リクエスト頻度が高すぎます'
+          break
+        case 500:
+          normalizedError.message = 'サーバーエラーが発生しました'
+          break
+      }
+    } else if (error.request) {
+      // ネットワークエラー
+      normalizedError.message = 'ネットワークエラーが発生しました'
+      normalizedError.status = 0
+    }
+    
+    return normalizedError
+  }
+  
+  /**
+   * リトライ判定
+   */
+  shouldRetry(error) {
+    // リトライ回数をチェック
+    const retryCount = error.config.__retryCount || 0
+    if (retryCount >= this.retryConfig.retries) {
+      return false
+    }
+    
+    // リトライ条件をチェック
+    return this.retryConfig.retryCondition(error)
+  }
+  
+  /**
+   * リクエストリトライ実行
+   */
+  async retryRequest(error) {
+    const retryCount = (error.config.__retryCount || 0) + 1
+    error.config.__retryCount = retryCount
+    
+    console.warn(`🔄 Retrying request (${retryCount}/${this.retryConfig.retries})...`)
+    
+    // 指数バックオフでリトライ間隔を調整
+    const delay = this.retryConfig.retryDelay * Math.pow(2, retryCount - 1)
+    await this.sleep(delay)
+    
+    return this.client.request(error.config)
+  }
+  
+  /**
+   * 認証トークンを取得
+   */
+  getAuthToken() {
+    // localStorage、Vuex、Cookieなどから取得
+    return localStorage.getItem('authToken')
+  }
+  
+  /**
+   * CSRFトークンを取得
+   */
+  getCSRFToken() {
+    // Cookieから取得
+    const cookies = document.cookie.split(';')
+    for (let cookie of cookies) {
+      const [name, value] = cookie.trim().split('=')
+      if (name === 'csrftoken') {
+        return value
+      }
+    }
+    return null
+  }
+  
+  /**
+   * リクエストIDを生成
+   */
+  generateRequestId() {
+    return Math.random().toString(36).substr(2, 9) + Date.now().toString(36)
+  }
+  
+  /**
+   * エラーログ記録
+   */
+  logError(error) {
+    const errorLog = {
+      timestamp: new Date().toISOString(),
+      url: error.config?.url,
+      method: error.config?.method,
+      status: error.response?.status,
+      message: error.message,
+      requestId: error.config?.headers?.['X-Request-ID']
+    }
+    
+    console.error('❌ API Error:', errorLog)
+    
+    // 本番環境では外部ログサービスに送信
+    if (process.env.NODE_ENV === 'production') {
+      this.sendErrorToLoggingService(errorLog)
+    }
+  }
+  
+  /**
+   * 外部ログサービスにエラーを送信（例：Sentry, LogRocket等）
+   */
+  sendErrorToLoggingService(errorLog) {
+    // 実装例：Sentryにエラーを送信
+    // Sentry.captureException(new Error(errorLog.message), { extra: errorLog })
+  }
+  
+  /**
+   * 指定時間待機
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+  
+  // ===== APIメソッド =====
+  
+  /**
+   * ユーザー詳細取得
+   */
+  async getUserDetail(userId) {
+    return this.client.get(`/users/${userId}/`)
+  }
+  
+  /**
+   * ユーザー検索
+   */
+  async searchUsers(params = {}) {
+    return this.client.get('/users/search/', { params })
+  }
+  
+  /**
+   * ユーザー作成
+   */
+  async createUser(userData) {
+    return this.client.post('/users/', userData)
+  }
+  
+  /**
+   * ユーザー更新
+   */
+  async updateUser(userId, userData) {
+    return this.client.patch(`/users/${userId}/`, userData)
+  }
+  
+  /**
+   * ユーザー削除
+   */
+  async deleteUser(userId) {
+    return this.client.delete(`/users/${userId}/`)
+  }
+}
+
+// シングルトンインスタンスをエクスポート
+export default new APIClient()
+```
+
+### 高度なVueコンポーネント実装
+
+```vue
+<!-- components/UserManagement.vue -->
+<template>
+  <div class="user-management">
+    <!-- ヘッダー -->
+    <header class="management-header">
+      <h1 class="header-title">ユーザー管理システム</h1>
+      <div class="header-actions">
+        <button 
+          @click="showCreateModal = true" 
+          class="btn btn-primary"
+          :disabled="loading"
+        >
+          <i class="icon-plus"></i>
+          新規ユーザー作成
+        </button>
+        <button 
+          @click="refreshData" 
+          class="btn btn-secondary"
+          :disabled="loading"
+        >
+          <i class="icon-refresh" :class="{ 'spinning': loading }"></i>
+          更新
+        </button>
+      </div>
+    </header>
+
+    <!-- 検索フィルター -->
+    <div class="search-section">
+      <div class="search-form">
+        <div class="form-row">
+          <!-- 名前検索 -->
+          <div class="form-group">
+            <label for="searchName">名前</label>
+            <input
+              id="searchName"
+              v-model="searchFilters.name"
+              @input="debounceSearch"
+              type="text"
+              placeholder="部分一致で検索"
+              class="form-control"
+            />
+          </div>
+
+          <!-- 都市フィルター -->
+          <div class="form-group">
+            <label for="searchCity">都市</label>
+            <select
+              id="searchCity"
+              v-model="searchFilters.city"
+              @change="performSearch"
+              class="form-control"
+            >
+              <option value="">すべて</option>
+              <option
+                v-for="city in cityOptions"
+                :key="city.value"
+                :value="city.value"
+              >
+                {{ city.label }}
+              </option>
+            </select>
+          </div>
+
+          <!-- 年齢フィルター -->
+          <div class="form-group age-range">
+            <label>年齢</label>
+            <div class="age-inputs">
+              <input
+                v-model.number="searchFilters.age_min"
+                @input="debounceSearch"
+                type="number"
+                min="0"
+                max="150"
+                placeholder="最小"
+                class="form-control age-input"
+              />
+              <span class="age-separator">〜</span>
+              <input
+                v-model.number="searchFilters.age_max"
+                @input="debounceSearch"
+                type="number"
+                min="0"
+                max="150"
+                placeholder="最大"
+                class="form-control age-input"
+              />
+            </div>
+          </div>
+
+          <!-- 検索アクション -->
+          <div class="form-group">
+            <label>&nbsp;</label>
+            <div class="search-actions">
+              <button
+                @click="performSearch"
+                :disabled="loading"
+                class="btn btn-primary"
+              >
+                <i class="icon-search"></i>
+                検索
+              </button>
+              <button
+                @click="clearFilters"
+                class="btn btn-outline"
+              >
+                <i class="icon-clear"></i>
+                クリア
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- データテーブル -->
+    <div class="table-section">
+      <!-- ローディング状態 -->
+      <div v-if="loading && !users.length" class="loading-container">
+        <div class="loading-spinner"></div>
+        <p>データを読み込み中...</p>
+      </div>
+
+      <!-- エラー表示 -->
+      <div v-else-if="error" class="error-container">
+        <div class="error-message">
+          <i class="icon-error"></i>
+          <h3>エラーが発生しました</h3>
+          <p>{{ error }}</p>
+          <button @click="refreshData" class="btn btn-primary">
+            再試行
+          </button>
+        </div>
+      </div>
+
+      <!-- データテーブル -->
+      <div v-else-if="users.length > 0" class="table-container">
+        <!-- テーブルヘッダー情報 -->
+        <div class="table-info">
+          <span class="result-count">
+            {{ pagination.total_count }}件中 
+            {{ ((pagination.current_page - 1) * pagination.page_size) + 1 }}〜{{ 
+              Math.min(pagination.current_page * pagination.page_size, pagination.total_count) 
+            }}件を表示
+          </span>
+          
+          <!-- ページサイズ選択 -->
+          <div class="page-size-selector">
+            <label>表示件数:</label>
+            <select 
+              v-model="pagination.page_size" 
+              @change="changePageSize"
+              class="form-control-sm"
+            >
+              <option :value="10">10件</option>
+              <option :value="20">20件</option>
+              <option :value="50">50件</option>
+              <option :value="100">100件</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- テーブル本体 -->
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th
+                  v-for="column in tableColumns"
+                  :key="column.key"
+                  :class="{ 'sortable': column.sortable, 'active': currentSort === column.key }"
+                  @click="column.sortable && handleSort(column.key)"
+                >
+                  {{ column.label }}
+                  <i
+                    v-if="column.sortable"
+                    :class="getSortIcon(column.key)"
+                    class="sort-icon"
+                  ></i>
+                </th>
+                <th class="actions-column">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="user in users"
+                :key="user.id"
+                class="table-row"
+                :class="{ 'inactive': !user.is_active }"
+              >
+                <!-- ユーザー名 -->
+                <td class="user-name">
+                  <div class="user-info">
+                    <strong>{{ user.name }}</strong>
+                    <span v-if="!user.is_active" class="inactive-badge">無効</span>
+                  </div>
+                </td>
+
+                <!-- メールアドレス -->
+                <td class="user-email">
+                  <a :href="`mailto:${user.email}`">{{ user.email }}</a>
+                </td>
+
+                <!-- 年齢 -->
+                <td class="user-age">
+                  {{ user.age || '-' }}歳
+                </td>
+
+                <!-- 都市 -->
+                <td class="user-city">
+                  {{ user.city_display || '-' }}
+                </td>
+
+                <!-- 作成日時 -->
+                <td class="user-created">
+                  {{ formatDate(user.created_at) }}
+                </td>
+
+                <!-- 操作ボタン -->
+                <td class="actions">
+                  <div class="action-buttons">
+                    <button
+                      @click="editUser(user)"
+                      class="btn btn-sm btn-outline"
+                      title="編集"
+                    >
+                      <i class="icon-edit"></i>
+                    </button>
+                    <button
+                      @click="toggleUserStatus(user)"
+                      :class="['btn', 'btn-sm', user.is_active ? 'btn-warning' : 'btn-success']"
+                      :title="user.is_active ? '無効化' : '有効化'"
+                    >
+                      <i :class="user.is_active ? 'icon-pause' : 'icon-play'"></i>
+                    </button>
+                    <button
+                      @click="deleteUser(user)"
+                      class="btn btn-sm btn-danger"
+                      title="削除"
+                    >
+                      <i class="icon-delete"></i>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- ページネーション -->
+        <div class="pagination-container">
+          <div class="pagination-info">
+            ページ {{ pagination.current_page }} / {{ pagination.total_pages }}
+          </div>
+          
+          <nav class="pagination">
+            <!-- 最初のページ -->
+            <button
+              @click="changePage(1)"
+              :disabled="pagination.current_page === 1"
+              class="btn btn-pagination"
+              title="最初のページ"
+            >
+              <i class="icon-first"></i>
+            </button>
+
+            <!-- 前のページ -->
+            <button
+              @click="changePage(pagination.current_page - 1)"
+              :disabled="!pagination.has_previous"
+              class="btn btn-pagination"
+              title="前のページ"
+            >
+              <i class="icon-prev"></i>
+            </button>
+
+            <!-- ページ番号 -->
+            <template v-for="page in paginationPages" :key="page">
+              <button
+                v-if="page !== '...'"
+                @click="changePage(page)"
+                :class="['btn', 'btn-pagination', { 'active': page === pagination.current_page }]"
+              >
+                {{ page }}
+              </button>
+              <span v-else class="pagination-ellipsis">...</span>
+            </template>
+
+            <!-- 次のページ -->
+            <button
+              @click="changePage(pagination.current_page + 1)"
+              :disabled="!pagination.has_next"
+              class="btn btn-pagination"
+              title="次のページ"
+            >
+              <i class="icon-next"></i>
+            </button>
+
+            <!-- 最後のページ -->
+            <button
+              @click="changePage(pagination.total_pages)"
+              :disabled="pagination.current_page === pagination.total_pages"
+              class="btn btn-pagination"
+              title="最後のページ"
+            >
+              <i class="icon-last"></i>
+            </button>
+          </nav>
+        </div>
+      </div>
+
+      <!-- データなし -->
+      <div v-else class="empty-container">
+        <div class="empty-message">
+          <i class="icon-empty"></i>
+          <h3>データがありません</h3>
+          <p>条件に一致するユーザーが見つかりませんでした。</p>
+          <button @click="clearFilters" class="btn btn-primary">
+            フィルターをクリア
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ユーザー作成・編集モーダル -->
+    <UserFormModal
+      v-if="showCreateModal || showEditModal"
+      :visible="showCreateModal || showEditModal"
+      :user="editingUser"
+      :mode="editingUser ? 'edit' : 'create'"
+      @close="closeModal"
+      @save="handleUserSave"
+    />
+
+    <!-- 削除確認モーダル -->
+    <ConfirmModal
+      v-if="showDeleteModal"
+      :visible="showDeleteModal"
+      title="ユーザー削除確認"
+      :message="`「${deletingUser?.name}」を削除しますか？この操作は取り消せません。`"
+      danger
+      @confirm="confirmDelete"
+      @cancel="showDeleteModal = false"
+    />
+
+    <!-- 通知トースト -->
+    <Toast
+      v-for="notification in notifications"
+      :key="notification.id"
+      :notification="notification"
+      @close="removeNotification"
+    />
+  </div>
+</template>
+
+<script>
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import APIClient from '@/api/client'
+import UserFormModal from './UserFormModal.vue'
+import ConfirmModal from './ConfirmModal.vue'
+import Toast from './Toast.vue'
+import { debounce } from 'lodash-es'
+
+export default {
+  name: 'UserManagement',
+  components: {
+    UserFormModal,
+    ConfirmModal,
+    Toast
+  },
+  
+  setup() {
+    // ===== リアクティブデータ =====
+    
+    // ユーザーリスト
+    const users = ref([])
+    
+    // ローディング状態
+    const loading = ref(false)
+    
+    // エラー状態
+    const error = ref(null)
+    
+    // 検索フィルター
+    const searchFilters = reactive({
+      name: '',
+      city: '',
+      age_min: null,
+      age_max: null
+    })
+    
+    // ページネーション情報
+    const pagination = reactive({
+      current_page: 1,
+      page_size: 20,
+      total_count: 0,
+      total_pages: 0,
+      has_previous: false,
+      has_next: false
+    })
+    
+    // ソート情報
+    const currentSort = ref('created_at')
+    const sortOrder = ref('desc')
+    
+    // モーダル状態
+    const showCreateModal = ref(false)
+    const showEditModal = ref(false)
+    const showDeleteModal = ref(false)
+    
+    // 編集・削除対象ユーザー
+    const editingUser = ref(null)
+    const deletingUser = ref(null)
+    
+    // 通知リスト
+    const notifications = ref([])
+    
+    // ===== 計算プロパティ =====
+    
+    // 都市選択肢
+    const cityOptions = computed(() => [
+      { value: 'tokyo', label: '東京' },
+      { value: 'osaka', label: '大阪' },
+      { value: 'nagoya', label: '名古屋' },
+      { value: 'fukuoka', label: '福岡' },
+      { value: 'sapporo', label: '札幌' },
+      { value: 'sendai', label: '仙台' },
+      { value: 'hiroshima', label: '広島' },
+      { value: 'other', label: 'その他' }
+    ])
+    
+    // テーブルカラム定義
+    const tableColumns = computed(() => [
+      { key: 'name', label: '名前', sortable: true },
+      { key: 'email', label: 'メールアドレス', sortable: true },
+      { key: 'age', label: '年齢', sortable: true },
+      { key: 'city', label: '都市', sortable: true },
+      { key: 'created_at', label: '作成日時', sortable: true }
+    ])
+    
+    // ページネーションページ番号配列
+    const paginationPages = computed(() => {
+      const currentPage = pagination.current_page
+      const totalPages = pagination.total_pages
+      const delta = 2 // 現在ページの前後に表示するページ数
+      
+      const pages = []
+      
+      // 最初のページは常に表示
+      if (totalPages > 0) {
+        pages.push(1)
+      }
+      
+      // 省略記号と中間ページを計算
+      const startPage = Math.max(2, currentPage - delta)
+      const endPage = Math.min(totalPages - 1, currentPage + delta)
+      
+      if (startPage > 2) {
+        pages.push('...')
+      }
+      
+      for (let i = startPage; i <= endPage; i++) {
+        pages.push(i)
+      }
+      
+      if (endPage < totalPages - 1) {
+        pages.push('...')
+      }
+      
+      // 最後のページ（最初のページと違う場合）
+      if (totalPages > 1) {
+        pages.push(totalPages)
+      }
+      
+      return pages
+    })
+    
+    // ===== メソッド =====
+    
+    /**
+     * データを読み込み
+     */
+    const loadData = async () => {
+      loading.value = true
+      error.value = null
+      
+      try {
+        // 検索パラメーターを構築
+        const params = {
+          page: pagination.current_page,
+          page_size: pagination.page_size,
+          sort_by: currentSort.value,
+          sort_order: sortOrder.value
+        }
+        
+        // 空でない検索フィルターを追加
+        Object.keys(searchFilters).forEach(key => {
+          const value = searchFilters[key]
+          if (value !== '' && value !== null && value !== undefined) {
+            params[key] = value
+          }
+        })
+        
+        // API呼び出し
+        const response = await APIClient.searchUsers(params)
+        
+        if (response.success) {
+          users.value = response.data.users || []
+          
+          // ページネーション情報を更新
+          if (response.data.pagination) {
+            Object.assign(pagination, response.data.pagination)
+          }
+        } else {
+          throw new Error(response.message || 'データの取得に失敗しました')
+        }
+        
+      } catch (err) {
+        console.error('Data loading error:', err)
+        error.value = err.message || 'データの取得でエラーが発生しました'
+        
+        // エラー通知を表示
+        addNotification('error', 'データ取得エラー', error.value)
+        
+      } finally {
+        loading.value = false
+      }
+    }
+    
+    /**
+     * 検索実行（デバウンス処理）
+     */
+    const debounceSearch = debounce(() => {
+      pagination.current_page = 1 // 検索時は1ページ目に戻る
+      loadData()
+    }, 500)
+    
+    /**
+     * 検索実行（即座）
+     */
+    const performSearch = () => {
+      pagination.current_page = 1
+      loadData()
+    }
+    
+    /**
+     * フィルタークリア
+     */
+    const clearFilters = () => {
+      // フィルターをリセット
+      Object.keys(searchFilters).forEach(key => {
+        if (typeof searchFilters[key] === 'string') {
+          searchFilters[key] = ''
+        } else {
+          searchFilters[key] = null
+        }
+      })
+      
+      // ソートをリセット
+      currentSort.value = 'created_at'
+      sortOrder.value = 'desc'
+      
+      // 1ページ目に戻って検索
+      pagination.current_page = 1
+      loadData()
+    }
+    
+    /**
+     * データ再読み込み
+     */
+    const refreshData = () => {
+      loadData()
+      addNotification('info', 'データ更新', 'データを再読み込みしました')
+    }
+    
+    /**
+     * ソート処理
+     */
+    const handleSort = (column) => {
+      if (currentSort.value === column) {
+        // 同じカラムの場合は昇順・降順を切り替え
+        sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
+      } else {
+        // 異なるカラムの場合は降順から開始
+        currentSort.value = column
+        sortOrder.value = 'desc'
+      }
+      
+      pagination.current_page = 1
+      loadData()
+    }
+    
+    /**
+     * ソートアイコンを取得
+     */
+    const getSortIcon = (column) => {
+      if (currentSort.value !== column) {
+        return 'icon-sort'
+      }
+      return sortOrder.value === 'asc' ? 'icon-sort-up' : 'icon-sort-down'
+    }
+    
+    /**
+     * ページ変更
+     */
+    const changePage = (page) => {
+      if (page >= 1 && page <= pagination.total_pages) {
+        pagination.current_page = page
+        loadData()
+      }
+    }
+    
+    /**
+     * ページサイズ変更
+     */
+    const changePageSize = () => {
+      pagination.current_page = 1
+      loadData()
+    }
+    
+    /**
+     * ユーザー編集
+     */
+    const editUser = (user) => {
+      editingUser.value = { ...user } // コピーを作成
+      showEditModal.value = true
+    }
+    
+    /**
+     * ユーザー削除
+     */
+    const deleteUser = (user) => {
+      deletingUser.value = user
+      showDeleteModal.value = true
+    }
+    
+    /**
+     * ユーザー削除確認
+     */
+    const confirmDelete = async () => {
+      try {
+        loading.value = true
+        
+        const response = await APIClient.deleteUser(deletingUser.value.id)
+        
+        if (response.success) {
+          addNotification('success', '削除完了', 'ユーザーを削除しました')
+          
+          // データを再読み込み
+          await loadData()
+        } else {
+          throw new Error(response.message || '削除に失敗しました')
+        }
+        
+      } catch (err) {
+        console.error('Delete error:', err)
+        addNotification('error', '削除エラー', err.message || '削除処理でエラーが発生しました')
+        
+      } finally {
+        loading.value = false
+        showDeleteModal.value = false
+        deletingUser.value = null
+      }
+    }
+    
+    /**
+     * ユーザーステータス切り替え
+     */
+    const toggleUserStatus = async (user) => {
+      try {
+        loading.value = true
+        
+        const response = await APIClient.updateUser(user.id, {
+          is_active: !user.is_active
+        })
+        
+        if (response.success) {
+          const action = user.is_active ? '無効化' : '有効化'
+          addNotification('success', 'ステータス変更', `ユーザーを${action}しました`)
+          
+          // ローカルのデータを更新
+          user.is_active = !user.is_active
+        } else {
+          throw new Error(response.message || 'ステータス変更に失敗しました')
+        }
+        
+      } catch (err) {
+        console.error('Status toggle error:', err)
+        addNotification('error', 'ステータス変更エラー', err.message)
+        
+      } finally {
+        loading.value = false
+      }
+    }
+    
+    /**
+     * モーダルを閉じる
+     */
+    const closeModal = () => {
+      showCreateModal.value = false
+      showEditModal.value = false
+      editingUser.value = null
+    }
+    
+    /**
+     * ユーザー保存処理
+     */
+    const handleUserSave = async (userData) => {
+      try {
+        loading.value = true
+        
+        let response
+        if (editingUser.value) {
+          // 更新
+          response = await APIClient.updateUser(editingUser.value.id, userData)
+        } else {
+          // 作成
+          response = await APIClient.createUser(userData)
+        }
+        
+        if (response.success) {
+          const action = editingUser.value ? '更新' : '作成'
+          addNotification('success', `ユーザー${action}`, `ユーザーを${action}しました`)
+          
+          // モーダルを閉じる
+          closeModal()
+          
+          // データを再読み込み
+          await loadData()
+        } else {
+          throw new Error(response.message || '保存に失敗しました')
+        }
+        
+      } catch (err) {
+        console.error('Save error:', err)
+        addNotification('error', '保存エラー', err.message)
+        
+      } finally {
+        loading.value = false
+      }
+    }
+    
+    /**
+     * 通知を追加
+     */
+    const addNotification = (type, title, message) => {
+      const notification = {
+        id: Date.now() + Math.random(),
+        type, // 'success', 'error', 'warning', 'info'
+        title,
+        message,
+        timestamp: new Date()
+      }
+      
+      notifications.value.push(notification)
+      
+      // 5秒後に自動削除
+      setTimeout(() => {
+        removeNotification(notification.id)
+      }, 5000)
+    }
+    
+    /**
+     * 通知を削除
+     */
+    const removeNotification = (notificationId) => {
+      const index = notifications.value.findIndex(n => n.id === notificationId)
+      if (index > -1) {
+        notifications.value.splice(index, 1)
+      }
+    }
+    
+    /**
+     * 日時フォーマット
+     */
+    const formatDate = (dateString) => {
+      if (!dateString) return '-'
+      
+      const date = new Date(dateString)
+      return date.toLocaleString('ja-JP', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    }
+    
+    // ===== ライフサイクル =====
+    
+    onMounted(() => {
+      loadData()
+    })
+    
+    // ===== Return =====
+    
+    return {
+      // データ
+      users,
+      loading,
+      error,
+      searchFilters,
+      pagination,
+      currentSort,
+      sortOrder,
+      showCreateModal,
+      showEditModal,
+      showDeleteModal,
+      editingUser,
+      deletingUser,
+      notifications,
+      
+      // 計算プロパティ
+      cityOptions,
+      tableColumns,
+      paginationPages,
+      
+      // メソッド
+      loadData,
+      debounceSearch,
+      performSearch,
+      clearFilters,
+      refreshData,
+      handleSort,
+      getSortIcon,
+      changePage,
+      changePageSize,
+      editUser,
+      deleteUser,
+      confirmDelete,
+      toggleUserStatus,
+      closeModal,
+      handleUserSave,
+      addNotification,
+      removeNotification,
+      formatDate
+    }
+  }
+}
+</script>
+
+<style scoped>
+/* ===== ベーススタイル ===== */
+.user-management {
+  padding: 2rem;
+  background-color: #f8f9fa;
+  min-height: 100vh;
+}
+
+/* ===== ヘッダー ===== */
+.management-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.header-title {
+  margin: 0;
+  color: #2c3e50;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  gap: 1rem;
+}
+
+/* ===== 検索セクション ===== */
+.search-section {
+  margin-bottom: 2rem;
+}
+
+.search-form {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 200px;
+  gap: 1rem;
+  align-items: end;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-group label {
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  color: #495057;
+}
+
+.form-control {
+  padding: 0.75rem;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.form-control:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+.age-range .age-inputs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.age-input {
+  flex: 1;
+}
+
+.age-separator {
+  color: #6c757d;
+  font-weight: 500;
+}
+
+.search-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ===== ボタンスタイル ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: #007bff;
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
+.btn-secondary {
+  background-color: #6c757d;
+  color: white;
+}
+
+.btn-outline {
+  background-color: transparent;
+  border: 1px solid #ced4da;
+  color: #495057;
+}
+
+.btn-outline:hover {
+  background-color: #f8f9fa;
+}
+
+.btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+}
+
+.btn-success {
+  background-color: #28a745;
+  color: white;
+}
+
+.btn-warning {
+  background-color: #ffc107;
+  color: #212529;
+}
+
+.btn-danger {
+  background-color: #dc3545;
+  color: white;
+}
+
+/* ===== テーブルセクション ===== */
+.table-section {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  overflow: hidden;
+}
+
+.table-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #dee2e6;
+  background-color: #f8f9fa;
+}
+
+.result-count {
+  font-weight: 500;
+  color: #495057;
+}
+
+.page-size-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.form-control-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+}
+
+/* ===== データテーブル ===== */
+.table-responsive {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th,
+.data-table td {
+  padding: 1rem;
+  text-align: left;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.data-table th {
+  background-color: #f8f9fa;
+  font-weight: 600;
+  color: #495057;
+  position: relative;
+}
+
+.data-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.data-table th.sortable:hover {
+  background-color: #e9ecef;
+}
+
+.data-table th.active {
+  background-color: #e3f2fd;
+  color: #1976d2;
+}
+
+.sort-icon {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #6c757d;
+}
+
+.table-row {
+  transition: background-color 0.15s ease-in-out;
+}
+
+.table-row:hover {
+  background-color: #f8f9fa;
+}
+
+.table-row.inactive {
+  opacity: 0.6;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.inactive-badge {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  background-color: #6c757d;
+  color: white;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.user-email a {
+  color: #007bff;
+  text-decoration: none;
+}
+
+.user-email a:hover {
+  text-decoration: underline;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* ===== ページネーション ===== */
+.pagination-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #dee2e6;
+  background-color: #f8f9fa;
+}
+
+.pagination-info {
+  font-weight: 500;
+  color: #495057;
+}
+
+.pagination {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.btn-pagination {
+  padding: 0.5rem 0.75rem;
+  background-color: white;
+  border: 1px solid #dee2e6;
+  color: #495057;
+  font-size: 0.875rem;
+}
+
+.btn-pagination.active {
+  background-color: #007bff;
+  border-color: #007bff;
+  color: white;
+}
+
+.btn-pagination:hover:not(:disabled):not(.active) {
+  background-color: #f8f9fa;
+}
+
+.pagination-ellipsis {
+  padding: 0.5rem 0.25rem;
+  color: #6c757d;
+}
+
+/* ===== 状態表示 ===== */
+.loading-container,
+.error-container,
+.empty-container {
+  padding: 4rem 2rem;
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 3rem;
+  height: 3rem;
+  border: 0.3rem solid #f3f3f3;
+  border-top: 0.3rem solid #007bff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+.error-message h3,
+.empty-message h3 {
+  color: #495057;
+  margin-bottom: 1rem;
+}
+
+.error-message p,
+.empty-message p {
+  color: #6c757d;
+  margin-bottom: 1.5rem;
+}
+
+/* ===== レスポンシブ対応 ===== */
+@media (max-width: 1200px) {
+  .form-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+}
+
+@media (max-width: 768px) {
+  .user-management {
+    padding: 1rem;
+  }
+  
+  .management-header {
+    flex-direction: column;
+    gap: 1rem;
+  }
+  
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .table-info {
+    flex-direction: column;
+    gap: 1rem;
+  }
+  
+  .pagination-container {
+    flex-direction: column;
+    gap: 1rem;
+  }
+  
+  .data-table {
+    font-size: 0.875rem;
+  }
+  
+  .data-table th,
+  .data-table td {
+    padding: 0.75rem 0.5rem;
+  }
+}
+</style>
+```
+
+---
+
+## 4. データベース最適化戦略 {#database-optimization}
+
+### インデックス設計と最適化
+
+```sql
+-- データベース最適化のためのSQLスクリプト
+
+-- 1. 基本インデックス（単一カラム）
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_created_at ON users(created_at);
+CREATE INDEX idx_users_is_active ON users(is_active);
+CREATE INDEX idx_users_is_deleted ON users(is_deleted);
+
+-- 2. 複合インデックス（複数カラムの組み合わせ）
+-- よく使われる検索条件の組み合わせに対応
+CREATE INDEX idx_users_active_deleted ON users(is_active, is_deleted);
+CREATE INDEX idx_users_city_age ON users(city, age) WHERE is_deleted = FALSE;
+CREATE INDEX idx_users_created_active ON users(created_at, is_active) WHERE is_deleted = FALSE;
+
+-- 3. 部分インデックス（条件付きインデックス）
+-- アクティブなユーザーのみをインデックス化
+CREATE INDEX idx_users_active_name ON users(name) WHERE is_active = TRUE AND is_deleted = FALSE;
+CREATE INDEX idx_users_active_email ON users(email) WHERE is_active = TRUE AND is_deleted = FALSE;
+
+-- 4. 関数ベースインデックス（検索最適化）
+-- 大文字小文字を区別しない検索用
+CREATE INDEX idx_users_name_lower ON users(LOWER(name)) WHERE is_deleted = FALSE;
+CREATE INDEX idx_users_email_lower ON users(LOWER(email)) WHERE is_deleted = FALSE;
+
+-- 5. カバリングインデックス（INCLUDE句使用）
+-- よく使われるカラムを含むインデックス
+CREATE INDEX idx_users_search_covering ON users(is_active, city, age) 
+INCLUDE (name, email, created_at) WHERE is_deleted = FALSE;
+
+-- 6. GINインデックス（全文検索用）- PostgreSQL
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_users_name_gin ON users USING gin(name gin_trgm_ops) WHERE is_deleted = FALSE;
+
+-- 7. パーティショニング用インデックス
+CREATE INDEX idx_users_created_year ON users(EXTRACT(YEAR FROM created_at), is_deleted);
+
+-- インデックス使用状況の確認クエリ
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    idx_scan as index_scans,
+    idx_tup_read as tuples_read,
+    idx_tup_fetch as tuples_fetched
+FROM pg_stat_user_indexes 
+WHERE tablename = 'users'
+ORDER BY idx_scan DESC;
+```
+
+### 高度なクエリ最適化
+
+```python
+# utils/database.py - データベース最適化ユーティリティ
+
+import logging
+from django.db import connection
+from django.conf import settings
+from typing import Dict, List, Any, Optional
+from contextlib import contextmanager
+import time
+
+logger = logging.getLogger(__name__)
+
+class QueryOptimizer:
+    """
+    クエリ最適化のためのユーティリティクラス
+    パフォーマンス監視、クエリ分析、最適化提案機能を提供
+    """
+    
+    @staticmethod
+    @contextmanager
+    def query_profiler(query_name: str):
+        """
+        クエリ実行時間を測定するコンテキストマネージャー
+        
+        使用例:
+        with QueryOptimizer.query_profiler('user_search'):
+            # データベースクエリを実行
+            results = cursor.execute(sql, params)
+        """
+        start_time = time.time()
+        
+        try:
+            yield
+        finally:
+            execution_time = time.time() - start_time
+            
+            # 実行時間をログに記録
+            logger.info(f"Query '{query_name}' executed in {execution_time:.3f}s")
+            
+            # 長時間実行クエリを警告
+            if execution_time > settings.SLOW_QUERY_THRESHOLD:
+                logger.warning(f"Slow query detected: '{query_name}' took {execution_time:.3f}s")
+    
+    @staticmethod
+    def analyze_query_plan(sql: str, params: List[Any] = None) -> Dict[str, Any]:
+        """
+        SQLクエリの実行計画を分析
+        
+        Args:
+            sql: 分析するSQLクエリ
+            params: SQLパラメーター
+            
+        Returns:
+            実行計画の詳細情報
+        """
+        with connection.cursor() as cursor:
+            # PostgreSQLの実行計画を取得
+            explain_sql = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}"
+            
+            try:
+                cursor.execute(explain_sql, params or [])
+                plan_result = cursor.fetchone()[0]
+                
+                # 実行計画を解析
+                analysis = QueryOptimizer._parse_execution_plan(plan_result[0])
+                
+                return {
+                    'execution_time': analysis.get('Execution Time', 0),
+                    'planning_time': analysis.get('Planning Time', 0),
+                    'total_cost': analysis.get('Total Cost', 0),
+                    'rows_returned': analysis.get('Actual Rows', 0),
+                    'sequential_scans': analysis.get('Sequential Scans', 0),
+                    'index_scans': analysis.get('Index Scans', 0),
+                    'recommendations': QueryOptimizer._generate_recommendations(analysis)
+                }
+                
+            except Exception as e:
+                logger.error(f"Query plan analysis failed: {str(e)}")
+                return {'error': str(e)}
+    
+    @staticmethod
+    def _parse_execution_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+        """実行計画を解析して重要な情報を抽出"""
+        analysis = {
+            'Execution Time': plan.get('Execution Time', 0),
+            'Planning Time': plan.get('Planning Time', 0),
+            'Total Cost': 0,
+            'Actual Rows': 0,
+            'Sequential Scans': 0,
+            'Index Scans': 0,
+            'Nested Loops': 0,
+            'Hash Joins': 0,
+            'Sort Operations': 0
+        }
+        
+        def extract_node_info(node):
+            """ノード情報を再帰的に抽出"""
+            if not isinstance(node, dict):
+                return
+            
+            # ノード種別による分類
+            node_type = node.get('Node Type', '')
+            
+            if 'Seq Scan' in node_type:
+                analysis['Sequential Scans'] += 1
+            elif 'Index' in node_type:
+                analysis['Index Scans'] += 1
+            elif 'Nested Loop' in node_type:
+                analysis['Nested Loops'] += 1
+            elif 'Hash Join' in node_type:
+                analysis['Hash Joins'] += 1
+            elif 'Sort' in node_type:
+                analysis['Sort Operations'] += 1
+            
+            # コストと行数を累積
+            analysis['Total Cost'] += node.get('Total Cost', 0)
+            analysis['Actual Rows'] += node.get('Actual Rows', 0)
+            
+            # 子ノードを再帰的に処理
+            if 'Plans' in node:
+                for child_node in node['Plans']:
+                    extract_node_info(child_node)
+        
+        # プランの最上位ノードから開始
+        if 'Plan' in plan:
+            extract_node_info(plan['Plan'])
+        
+        return analysis
+    
+    @staticmethod
+    def _generate_recommendations(analysis: Dict[str, Any]) -> List[str]:
+        """実行計画分析結果から最適化提案を生成"""
+        recommendations = []
+        
+        # シーケンシャルスキャンが多い場合
+        if analysis.get('Sequential Scans', 0) > 0:
+            recommendations.append(
+                "シーケンシャルスキャンが検出されました。適切なインデックスの作成を検討してください。"
+            )
+        
+        # 実行時間が長い場合
+        if analysis.get('Execution Time', 0) > 1000:  # 1秒以上
+            recommendations.append(
+                "クエリの実行時間が長すぎます。WHERE句の最適化やインデックスの見直しを行ってください。"
+            )
+        
+        # ソート操作が多い場合
+        if analysis.get('Sort Operations', 0) > 2:
+            recommendations.append(
+                "多数のソート操作が実行されています。ORDER BYに対応するインデックスを作成することを検討してください。"
+            )
+        
+        # ネストループが多い場合
+        if analysis.get('Nested Loops', 0) > 3:
+            recommendations.append(
+                "多数のネストループが実行されています。JOINの順序やインデックスの最適化を検討してください。"
+            )
+        
+        return recommendations
+
+class BatchProcessor:
+    """
+    大量データ処理のためのバッチ処理クラス
+    メモリ効率的なデータ処理を提供
+    """
+    
+    def __init__(self, batch_size: int = 1000):
+        self.batch_size = batch_size
+    
+    def process_in_batches(self, query: str, params: List[Any], 
+                          processor_func: callable) -> Dict[str, Any]:
+        """
+        大量データをバッチ処理で効率的に処理
+        
+        Args:
+            query: バッチ処理用SQL（LIMIT/OFFSETを含む）
+            params: SQLパラメーター
+            processor_func: 各バッチを処理する関数
+            
+        Returns:
+            処理結果の統計情報
+        """
+        total_processed = 0
+        batch_count = 0
+        errors = []
+        
+        with connection.cursor() as cursor:
+            offset = 0
+            
+            while True:
+                # バッチ用クエリを構築
+                batch_query = f"{query} LIMIT %s OFFSET %s"
+                batch_params = params + [self.batch_size, offset]
+                
+                try:
+                    # バッチデータを取得
+                    cursor.execute(batch_query, batch_params)
+                    rows = cursor.fetchall()
+                    
+                    # データがない場合は終了
+                    if not rows:
+                        break
+                    
+                    # カラム名を取得
+                    columns = [desc[0] for desc in cursor.description]
+                    
+                    # データを辞書形式に変換
+                    batch_data = []
+                    for row in rows:
+                        batch_data.append(dict(zip(columns, row)))
+                    
+                    # バッチ処理を実行
+                    processor_func(batch_data)
+                    
+                    total_processed += len(batch_data)
+                    batch_count += 1
+                    offset += self.batch_size
+                    
+                    # プログレス表示
+                    if batch_count % 10 == 0:
+                        logger.info(f"Processed {total_processed} records in {batch_count} batches")
+                        
+                except Exception as e:
+                    error_msg = f"Batch {batch_count} failed: {str(e)}"
+                    logger.error(error_msg)
+                    errors.append(error_msg)
+                    break
+        
+        return {
+            'total_processed': total_processed,
+            'batch_count': batch_count,
+            'errors': errors
+        }
+
+class CacheManager:
+    """
+    高度なキャッシュ管理クラス
+    階層化キャッシュとキャッシュ無効化戦略を提供
+    """
+    
+    @staticmethod
+    def get_multi_level_cache(keys: List[str], 
+                             fallback_func: callable,
+                             cache_timeout: int = 300) -> Dict[str, Any]:
+        """
+        多層キャッシュからデータを取得
+        
+        Args:
+            keys: キャッシュキーのリスト
+            fallback_func: キャッシュミス時の代替処理関数
+            cache_timeout: キャッシュ有効期限（秒）
+            
+        Returns:
+            キャッシュされたデータ
+        """
+        from django.core.cache import cache
+        
+        results = {}
+        missing_keys = []
+        
+        # 第1層: Redisキャッシュから取得
+        for key in keys:
+            cached_value = cache.get(key)
+            if cached_value is not None:
+                results[key] = cached_value
+            else:
+                missing_keys.append(key)
+        
+        # キャッシュミスがある場合
+        if missing_keys:
+            # 第2層: データベースから取得
+            fresh_data = fallback_func(missing_keys)
+            
+            # 新しいデータをキャッシュに保存
+            cache_data = {}
+            for key in missing_keys:
+                if key in fresh_data:
+                    cache_data[key] = fresh_data[key]
+            
+            cache.set_many(cache_data, timeout=cache_timeout)
+            results.update(fresh_data)
+        
+        return results
+    
+    @staticmethod
+    def invalidate_pattern(pattern: str):
+        """
+        パターンマッチングによるキャッシュ無効化
+        
+        Args:
+            pattern: 無効化するキャッシュキーのパターン（例: "user_*"）
+        """
+        from django.core.cache import cache
+        
+        try:
+            # Redisの場合のキー削除
+            import redis
+            from django.conf import settings
+            
+            redis_client = redis.Redis.from_url(settings.CACHES['default']['LOCATION'])
+            keys = redis_client.keys(pattern)
+            
+            if keys:
+                redis_client.delete(*keys)
+                logger.info(f"Invalidated {len(keys)} cache keys matching pattern: {pattern}")
+                
+        except ImportError:
+            # Redisが利用できない場合のフォールバック
+            logger.warning("Redis not available for pattern-based cache invalidation")
+```
+
+---
+
+## 5. セキュリティ強化 {#security-hardening}
+
+### エンタープライズレベルのセキュリティ実装
+
+```python
+# security/middleware.py - セキュリティミドルウェア
+
+import hashlib
+import hmac
+import time
+import json
+import logging
+from django.http import JsonResponse
+from django.conf import settings
+from django.utils.deprecation import MiddlewareMixin
+from django.core.cache import cache
+from django.utils import timezone
+from datetime import timedelta
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+class SecurityMiddleware(MiddlewareMixin):
+    """
+    包括的なセキュリティミドルウェア
+    レート制限、リクエスト検証、セキュリティヘッダー設定を提供
+    """
+    
+    def __init__(self, get_response=None):
+        super().__init__(get_response)
+        self.rate_limiter = RateLimiter()
+        self.request_validator = RequestValidator()
+        self.security_headers = SecurityHeaders()
+    
+    def process_request(self, request):
+        """リクエスト前処理"""
+        
+        # 1. レート制限チェック
+        if not self.rate_limiter.is_allowed(request):
+            logger.warning(f"Rate limit exceeded for {self.get_client_ip(request)}")
+            return JsonResponse({
+                'error': 'Rate limit exceeded',
+                'message': 'リクエスト頻度が制限を超えています'
+            }, status=429)
+        
+        # 2. リクエスト検証
+        validation_result = self.request_validator.validate(request)
+        if not validation_result['valid']:
+            logger.warning(f"Invalid request from {self.get_client_ip(request)}: {validation_result['reason']}")
+            return JsonResponse({
+                'error': 'Invalid request',
+                'message': validation_result['reason']
+            }, status=400)
+        
+        # 3. セキュリティログ記録
+        self.log_request(request)
+        
+        return None
+    
+    def process_response(self, request, response):
+        """レスポンス後処理"""
+        
+        # セキュリティヘッダーを追加
+        response = self.security_headers.add_headers(response)
+        
+        # レスポンスログ記録
+        self.log_response(request, response)
+        
+        return response
+    
+    def get_client_ip(self, request) -> str:
+        """クライアントIPアドレスを取得"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        
+        if x_forwarded_for:
+            # プロキシ経由の場合、最初のIPを取得
+            ip = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip = request.META.get('REMOTE_ADDR', 'unknown')
+        
+        return ip
+    
+    def log_request(self, request):
+        """リクエストログを記録"""
+        log_data = {
+            'timestamp': timezone.now().isoformat(),
+            'method': request.method,
+            'path': request.path,
+            'ip': self.get_client_ip(request),
+            'user_agent': request.META.get('HTTP_USER_AGENT', ''),
+            'referer': request.META.get('HTTP_REFERER', ''),
+            'content_length': request.META.get('CONTENT_LENGTH', 0)
+        }
+        
+        logger.info(f"Request: {json.dumps(log_data)}")
+    
+    def log_response(self, request, response):
+        """レスポンスログを記録"""
+        log_data = {
+            'timestamp': timezone.now().isoformat(),
+            'method': request.method,
+            'path': request.path,
+            'ip': self.get_client_ip(request),
+            'status_code': response.status_code,
+            'response_size': len(response.content) if hasattr(response, 'content') else 0
+        }
+        
+        # エラーレスポンスの場合は警告レベル
+        if response.status_code >= 400:
+            logger.warning(f"Error Response: {json.dumps(log_data)}")
+        else:
+            logger.info(f"Response: {json.dumps(log_data)}")
+
+class RateLimiter:
+    """
+    高度なレート制限機能
+    複数の制限ルールとアダプティブ制限を提供
+    """
+    
+    def __init__(self):
+        # デフォルトのレート制限設定
+        self.default_limits = {
+            'requests_per_minute': 60,      # 1分間に60リクエスト
+            'requests_per_hour': 1000,      # 1時間に1000リクエスト
+            'requests_per_day': 10000       # 1日に10000リクエスト
+        }
+        
+        # APIエンドポイント別の制限設定
+        self.endpoint_limits = {
+            '/api/users/': {
+                'requests_per_minute': 30,
+                'requests_per_hour': 500
+            },
+            '/api/users/search/': {
+                'requests_per_minute': 20,
+                'requests_per_hour': 300
+            }
+        }
+    
+    def is_allowed(self, request) -> bool:
+        """リクエストが制限内かチェック"""
+        client_ip = self.get_client_ip(request)
+        endpoint = request.path
+        
+        # エンドポイント固有の制限を取得
+        limits = self.endpoint_limits.get(endpoint, self.default_limits)
+        
+        # 各時間枠でチェック
+        for period, limit in limits.items():
+            if not self.check_limit(client_ip, endpoint, period, limit):
+                return False
+        
+        # 制限内の場合、カウンターを増加
+        self.increment_counters(client_ip, endpoint)
+        return True
+    
+    def check_limit(self, client_ip: str, endpoint: str, 
+                   period: str, limit: int) -> bool:
+        """指定期間の制限をチェック"""
+        
+        # キャッシュキーを生成
+        cache_key = f"rate_limit:{client_ip}:{endpoint}:{period}"
+        
+        # 現在のリクエスト数を取得
+        current_count = cache.get(cache_key, 0)
+        
+        return current_count < limit
+    
+    def increment_counters(self, client_ip: str, endpoint: str):
+        """リクエストカウンターを増加"""
+        
+        # 各期間のカウンターを増加
+        periods = {
+            'requests_per_minute': 60,      # 60秒
+            'requests_per_hour': 3600,      # 3600秒
+            'requests_per_day': 86400       # 86400秒
+        }
+        
+        for period, timeout in periods.items():
+            cache_key = f"rate_limit:{client_ip}:{endpoint}:{period}"
+            
+            try:
+                # アトミックな増加操作
+                current_count = cache.get(cache_key, 0)
+                cache.set(cache_key, current_count + 1, timeout=timeout)
+                
+            except Exception as e:
+                logger.error(f"Failed to increment rate limit counter: {str(e)}")
+    
+    def get_client_ip(self, request) -> str:
+        """クライアントIPを取得（SecurityMiddlewareと同じ実装）"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip = request.META.get('REMOTE_ADDR', 'unknown')
+        
+        return ip
+
+class RequestValidator:
+    """
+    リクエスト検証クラス
+    悪意のあるリクエストやスパムを検出
+    """
+    
+    def __init__(self):
+        # 禁止されたUser-Agentパターン
+        self.blocked_user_agents = [
+            'bot', 'crawler', 'spider', 'scraper',
+            'curl', 'wget', 'python-requests'
+        ]
+        
+        # 最大リクエストサイズ（バイト）
+        self.max_request_size = 10 * 1024 * 1024  # 10MB
+        
+        # 禁止されたファイル拡張子
+        self.blocked_extensions = [
+            '.php', '.asp', '.jsp', '.cgi'
+        ]
+    
+    def validate(self, request) -> Dict[str, Any]:
+        """リクエストを包括的に検証"""
+        
+        # 1. User-Agentチェック
+        user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+        if any(blocked in user_agent for blocked in self.blocked_user_agents):
+            return {
+                'valid': False,
+                'reason': 'Blocked User-Agent detected'
+            }
+        
+        # 2. リクエストサイズチェック
+        content_length = int(request.META.get('CONTENT_LENGTH', 0))
+        if content_length > self.max_request_size:
+            return {
+                'valid': False,
+                'reason': 'Request size too large'
+            }
+        
+        # 3. パス検証
+        if any(ext in request.path.lower() for ext in self.blocked_extensions):
+            return {
+                'valid': False,
+                'reason': 'Blocked file extension in path'
+            }
+        
+        # 4. SQLインジェクション検出
+        if self.detect_sql_injection(request):
+            return {
+                'valid': False,
+                'reason': 'Potential SQL injection detected'
+            }
+        
+        # 5. XSS検出
+        if self.detect_xss(request):
+            return {
+                'valid': False,
+                'reason': 'Potential XSS attack detected'
+            }
+        
+        return {'valid': True}
+    
+    def detect_sql_injection(self, request) -> bool:
+        """SQLインジェクション攻撃を検出"""
+        sql_patterns = [
+            'union select', 'drop table', 'insert into',
+            'delete from', 'update set', 'exec(', 'execute(',
+            'sp_', 'xp_', '--', ';--', '/*', '*/'
+        ]
+        
+        # URLパラメーターをチェック
+        query_string = request.META.get('QUERY_STRING', '').lower()
+        if any(pattern in query_string for pattern in sql_patterns):
+            return True
+        
+        # POSTデータをチェック
+        if hasattr(request, 'body') and request.body:
+            try:
+                body_str = request.body.decode('utf-8').lower()
+                if any(pattern in body_str for pattern in sql_patterns):
+                    return True
+            except UnicodeDecodeError:
+                pass  # バイナリデータの場合はスキップ
+        
+        return False
+    
+    def detect_xss(self, request) -> bool:
+        """XSS攻撃を検出"""
+        xss_patterns = [
+            '<script', 'javascript:', 'vbscript:',
+            'onload=', 'onerror=', 'onclick=',
+            'eval(', 'expression('
+        ]
+        
+        # URLパラメーターをチェック
+        query_string = request.META.get('QUERY_STRING', '').lower()
+        if any(pattern in query_string for pattern in xss_patterns):
+            return True
+        
+        # POSTデータをチェック
+        if hasattr(request, 'body') and request.body:
+            try:
+                body_str = request.body.decode('utf-8').lower()
+                if any(pattern in body_str for pattern in xss_patterns):
+                    return True
+            except UnicodeDecodeError:
+                pass
+        
+        return False
+
+class SecurityHeaders:
+    """
+    セキュリティヘッダー管理クラス
+    OWASP推奨のセキュリティヘッダーを設定
+    """
+    
+    def add_headers(self, response):
+        """セキュリティヘッダーをレスポンスに追加"""
+        
+        # Content Security Policy
+        response['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self'; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'"
+        )
+        
+        # X-Frame-Options（クリックジャッキング対策）
+        response['X-Frame-Options'] = 'DENY'
+        
+        # X-Content-Type-Options（MIMEタイプスニッフィング対策）
+        response['X-Content-Type-Options'] = 'nosniff'
+        
+        # X-XSS-Protection（XSS保護）
+        response['X-XSS-Protection'] = '1; mode=block'
+        
+        # Strict-Transport-Security（HTTPS強制）
+        if settings.SECURE_SSL_REDIRECT:
+            response['Strict-Transport-Security'] = (
+                'max-age=31536000; includeSubDomains; preload'
+            )
+        
+        # Referrer-Policy（リファラー制御）
+        response['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        
+        # Permissions-Policy（機能制限）
+        response['Permissions-Policy'] = (
+            'geolocation=(), microphone=(), camera=(), '
+            'payment=(), usb=(), magnetometer=(), gyroscope=()'
+        )
+        
+        return response
+
+class DataEncryption:
+    """
+    データ暗号化クラス
+    機密データの暗号化・復号化機能を提供
+    """
+    
+    def __init__(self):
+        self.key = settings.SECRET_KEY.encode()[:32]  # 32バイトキー
+    
+    def encrypt_sensitive_data(self, data: str) -> str:
+        """機密データを暗号化"""
+        from cryptography.fernet import Fernet
+        import base64
+        
+        # キーからFernetオブジェクトを生成
+        key = base64.urlsafe_b64encode(self.key)
+        fernet = Fernet(key)
+        
+        # データを暗号化
+        encrypted_data = fernet.encrypt(data.encode())
+        
+        return base64.urlsafe_b64encode(encrypted_data).decode()
+    
+    def decrypt_sensitive_data(self, encrypted_data: str) -> str:
+        """暗号化されたデータを復号化"""
+        from cryptography.fernet import Fernet
+        import base64
+        
+        try:
+            # キーからFernetオブジェクトを生成
+            key = base64.urlsafe_b64encode(self.key)
+            fernet = Fernet(key)
+            
+            # データを復号化
+            encrypted_bytes = base64.urlsafe_b64decode(encrypted_data.encode())
+            decrypted_data = fernet.decrypt(encrypted_bytes)
+            
+            return decrypted_data.decode()
+            
+        except Exception as e:
+            logger.error(f"Decryption failed: {str(e)}")
+            raise ValueError("データの復号化に失敗しました")
+    
+    def hash_password(self, password: str) -> str:
+        """パスワードをハッシュ化"""
+        import bcrypt
+        
+        # ソルトを生成してハッシュ化
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        
+        return hashed.decode('utf-8')
+    
+    def verify_password(self, password: str, hashed: str) -> bool:
+        """パスワードを検証"""
+        import bcrypt
+        
+        try:
+            return bcrypt.checkpw(
+                password.encode('utf-8'), 
+                hashed.encode('utf-8')
+            )
+        except Exception:
+            return False
+```
+
+---
+
+## 6. パフォーマンス・スケーラビリティ {#performance}
+
+### 高性能システム設計
+
+```python
+# performance/optimization.py - パフォーマンス最適化
+
+import asyncio
+import aiohttp
+import concurrent.futures
+from django.db import connections
+from django.core.cache import cache
+from django.conf import settings
+import logging
+import time
+from typing import List, Dict, Any, Optional, Callable
+from dataclasses import dataclass
+from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class PerformanceMetrics:
+    """パフォーマンス指標を格納するデータクラス"""
+    operation_name: str
+    start_time: float
+    end_time: float
+    execution_time: float
+    memory_usage: int
+    cache_hits: int
+    cache_misses: int
+    database_queries: int
+
+class PerformanceMonitor:
+    """
+    パフォーマンス監視クラス
+    実行時間、メモリ使用量、キャッシュ効率を追跡
+    """
+    
+    def __init__(self):
+        self.metrics_history = []
+        self.active_operations = {}
+    
+    @contextmanager
+    def monitor_operation(self, operation_name: str):
+        """
+        操作のパフォーマンスを監視するコンテキストマネージャー
+        
+        使用例:
+        with performance_monitor.monitor_operation('user_search'):
+            # 監視対象の処理
+            results = perform_search()
+        """
+        import psutil
+        import gc
+        
+        # 開始時の状態を記録
+        start_time = time.time()
+        start_memory = psutil.Process().memory_info().rss
+        start_queries = len(connections['default'].queries)
+        
+        # ガベージコレクションを実行
+        gc.collect()
+        
+        try:
+            yield
+            
+        finally:
+            # 終了時の状態を記録
+            end_time = time.time()
+            end_memory = psutil.Process().memory_info().rss
+            end_queries = len(connections['default'].queries)
+            
+            # メトリクスを作成
+            metrics = PerformanceMetrics(
+                operation_name=operation_name,
+                start_time=start_time,
+                end_time=end_time,
+                execution_time=end_time - start_time,
+                memory_usage=end_memory - start_memory,
+                cache_hits=0,  # キャッシュ統計は別途実装
+                cache_misses=0,
+                database_queries=end_queries - start_queries
+            )
+            
+            # メトリクスを保存
+            self.metrics_history.append(metrics)
+            
+            # パフォーマンスログを出力
+            self.log_performance(metrics)
+    
+    def log_performance(self, metrics: PerformanceMetrics):
+        """パフォーマンスメトリクスをログ出力"""
+        log_message = (
+            f"Performance: {metrics.operation_name} - "
+            f"Time: {metrics.execution_time:.3f}s, "
+            f"Memory: {metrics.memory_usage / 1024 / 1024:.2f}MB, "
+            f"Queries: {metrics.database_queries}"
+        )
+        
+        # 長時間実行の場合は警告
+        if metrics.execution_time > 2.0:
+            logger.warning(f"Slow operation detected: {log_message}")
+        else:
+            logger.info(log_message)
+    
+    def get_performance_summary(self, operation_name: str = None) -> Dict[str, Any]:
+        """パフォーマンスサマリーを取得"""
+        if operation_name:
+            relevant_metrics = [
+                m for m in self.metrics_history 
+                if m.operation_name == operation_name
+            ]
+        else:
+            relevant_metrics = self.metrics_history
+        
+        if not relevant_metrics:
+            return {}
+        
+        execution_times = [m.execution_time for m in relevant_metrics]
+        memory_usages = [m.memory_usage for m in relevant_metrics]
+        query_counts = [m.database_queries for m in relevant_metrics]
+        
+        return {
+            'operation_count': len(relevant_metrics),
+            'avg_execution_time': sum(execution_times) / len(execution_times),
+            'max_execution_time': max(execution_times),
+            'min_execution_time': min(execution_times),
+            'avg_memory_usage': sum(memory_usages) / len(memory_usages),
+            'avg_query_count': sum(query_counts) / len(query_counts),
+            'total_operations': len(self.metrics_history)
+        }
+
+class AsyncProcessor:
+    """
+    非同期処理クラス
+    I/O集約的な操作を並列実行
+    """
+    
+    def __init__(self, max_workers: int = 10):
+        self.max_workers = max_workers
+        self.executor = concurrent.futures.ThreadPoolExecu
